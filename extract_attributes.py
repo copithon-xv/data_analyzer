@@ -42,19 +42,41 @@ class ShapefileHandler(FileHandler):
             if gdf.empty:
                 return None
             
+            # Limit to first 10,000 records
+            gdf_sample = gdf.head(10000)
+            
             # Get column names (attributes)
-            attributes = list(gdf.columns)
+            attributes = list(gdf_sample.columns)
+            
+            best_row = None
+            best_count = -1
             
             # Find first row where all attributes have data (no nulls)
-            for idx, row in gdf.iterrows():
-                if not row.isnull().any():
+            # Or track the row with most non-null values
+            for idx, row in gdf_sample.iterrows():
+                null_count = row.isnull().sum()
+                non_null_count = len(row) - null_count
+                
+                if null_count == 0:
+                    # Found perfect row with all data
                     sample_data = row.to_dict()
-                    # Convert geometry to WKT string for better readability
                     if 'geometry' in sample_data:
                         sample_data['geometry'] = str(sample_data['geometry'])
                     return attributes, sample_data
+                
+                # Track best row (most complete)
+                if non_null_count > best_count:
+                    best_count = non_null_count
+                    best_row = row
             
-            return None  # No row with all non-null values found
+            # Use the best row found (most complete data)
+            if best_row is not None:
+                sample_data = best_row.to_dict()
+                if 'geometry' in sample_data:
+                    sample_data['geometry'] = str(sample_data['geometry'])
+                return attributes, sample_data
+            
+            return None
             
         except Exception as e:
             print(f"Error reading shapefile {file_path}: {e}")
@@ -69,7 +91,8 @@ class CSVHandler(FileHandler):
     
     def extract_data(self, file_path: Path) -> Optional[Tuple[List[str], Dict[str, Any]]]:
         try:
-            df = pd.read_csv(file_path)
+            # Read only first 10,000 rows for efficiency
+            df = pd.read_csv(file_path, nrows=10000)
             
             if df.empty:
                 return None
@@ -77,13 +100,29 @@ class CSVHandler(FileHandler):
             # Get column names (attributes)
             attributes = list(df.columns)
             
-            # Find first row where all attributes have data (no nulls)
-            for idx, row in df.iterrows():
-                if not row.isnull().any():
-                    sample_data = row.to_dict()
-                    return attributes, sample_data
+            best_row = None
+            best_count = -1
             
-            return None  # No row with all non-null values found
+            # Find first row where all attributes have data (no nulls)
+            # Or track the row with most non-null values
+            for idx, row in df.iterrows():
+                null_count = row.isnull().sum()
+                non_null_count = len(row) - null_count
+                
+                if null_count == 0:
+                    # Found perfect row with all data
+                    return attributes, row.to_dict()
+                
+                # Track best row (most complete)
+                if non_null_count > best_count:
+                    best_count = non_null_count
+                    best_row = row
+            
+            # Use the best row found (most complete data)
+            if best_row is not None:
+                return attributes, best_row.to_dict()
+            
+            return None
             
         except Exception as e:
             print(f"Error reading CSV {file_path}: {e}")
@@ -139,7 +178,10 @@ class AttributeExtractor:
                 # Generic name for other handlers
                 output_file = output_path / f"{handler_name.lower()}_attributes.txt"
             
-            print(f"\nProcessing {len(file_paths)} files with {handler_name}...")
+            total_files = len(file_paths)
+            print(f"\n{'='*80}")
+            print(f"Processing {total_files} files with {handler_name}")
+            print(f"{'='*80}")
             
             with open(output_file, 'w', encoding='utf-8') as f:
                 f.write(f"=== {handler_name} Attribute Extraction ===\n")
@@ -151,51 +193,63 @@ class AttributeExtractor:
                 skipped_count = 0
                 failed_count = 0
                 
-                for file_path in sorted(file_paths):
+                for idx, file_path in enumerate(sorted(file_paths), 1):
                     filename = file_path.name
+                    
+                    # Show progress
+                    progress_pct = (idx / total_files) * 100
+                    print(f"\n[{idx}/{total_files}] ({progress_pct:.1f}%)")
+                    print(f"  File: {filename}")
+                    print(f"  Path: {file_path}")
                     
                     # Skip if filename already processed
                     if filename in self.processed_filenames:
-                        print(f"  Skipped (duplicate): {filename}")
+                        print(f"  ⊘ Status: SKIPPED (duplicate filename)")
+                        print(f"  📊 Stats: ✓ {processed_count} | ⊘ {skipped_count + 1} | ✗ {failed_count}")
                         skipped_count += 1
                         continue
                     
                     result = handler.extract_data(file_path)
                     
                     if result is None:
-                        print(f"  Failed (no valid sample): {filename}")
-                        f.write(f"File: {filename}\n")
-                        f.write(f"Path: {file_path}\n")
-                        f.write(f"Status: No row with all non-null values found\n")
-                        f.write("-" * 80 + "\n\n")
+                        print(f"  ✗ Status: FAILED (no data found)")
+                        print(f"  📊 Stats: ✓ {processed_count} | ⊘ {skipped_count} | ✗ {failed_count + 1}")
                         failed_count += 1
                         continue
                     
                     attributes, sample_data = result
                     
-                    # Write to file
-                    f.write(f"File: {filename}\n")
-                    f.write(f"Path: {file_path}\n")
-                    f.write(f"Number of Attributes: {len(attributes)}\n\n")
+                    # Check data completeness
+                    null_count = sum(1 for v in sample_data.values() if pd.isna(v))
+                    completeness_pct = ((len(attributes) - null_count) / len(attributes)) * 100 if attributes else 0
                     
-                    f.write("Attributes:\n")
-                    for i, attr in enumerate(attributes, 1):
-                        f.write(f"  {i}. {attr}\n")
+                    # Show detailed info in console
+                    print(f"  ✓ Status: SUCCESS")
+                    print(f"  📋 Attributes: {len(attributes)}")
+                    print(f"  📊 Completeness: {completeness_pct:.1f}% ({len(attributes) - null_count}/{len(attributes)} fields)")
+                    print(f"  📈 Stats: ✓ {processed_count + 1} | ⊘ {skipped_count} | ✗ {failed_count}")
                     
-                    f.write("\nSample Data:\n")
+                    # Write to file with simple structured format (only attributes and sample data)
+                    f.write(f"[FILE_START]\n")
+                    f.write(f"Filename: {filename}\n\n")
+                    
+                    f.write("[ATTRIBUTES_START]\n")
+                    for attr in attributes:
+                        f.write(f"{attr}\n")
+                    f.write("[ATTRIBUTES_END]\n\n")
+                    
+                    f.write("[SAMPLE_DATA_START]\n")
                     for attr in attributes:
                         value = sample_data.get(attr, 'N/A')
-                        # Truncate long values
                         value_str = str(value)
-                        if len(value_str) > 100:
-                            value_str = value_str[:97] + "..."
-                        f.write(f"  {attr}: {value_str}\n")
-                    
-                    f.write("-" * 80 + "\n\n")
+                        # Use ||| as delimiter for easy parsing
+                        f.write(f"{attr}|||{value_str}\n")
+                    f.write("[SAMPLE_DATA_END]\n")
+                    f.write("[FILE_END]\n")
+                    f.write("=" * 80 + "\n\n")
                     
                     self.processed_filenames.add(filename)
                     processed_count += 1
-                    print(f"  Processed: {filename}")
                 
                 # Write summary
                 f.write("\n" + "=" * 80 + "\n")
@@ -206,8 +260,15 @@ class AttributeExtractor:
                 f.write(f"Skipped (duplicates): {skipped_count}\n")
                 f.write(f"Failed (no valid sample): {failed_count}\n")
             
-            print(f"\nResults saved to: {output_file}")
-            print(f"  Processed: {processed_count}, Skipped: {skipped_count}, Failed: {failed_count}")
+            print(f"\n{'='*80}")
+            print(f"SUMMARY - {handler_name}")
+            print(f"{'='*80}")
+            print(f"  Total files found:       {total_files}")
+            print(f"  ✓ Successfully processed: {processed_count}")
+            print(f"  ⊘ Skipped (duplicates):   {skipped_count}")
+            print(f"  ✗ Failed (no valid data): {failed_count}")
+            print(f"  📄 Output saved to:       {output_file}")
+            print(f"{'='*80}")
 
 
 def main():
