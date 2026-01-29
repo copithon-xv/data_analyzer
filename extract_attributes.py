@@ -135,30 +135,82 @@ class CSVHandler(FileHandler):
 class AttributeExtractor:
     """Main class for extracting attributes from files."""
     
-    def __init__(self, root_folder: str, handlers: List[FileHandler]):
+    def __init__(self, root_folder: str, handlers: List[FileHandler], config_file: Optional[str] = None):
         self.root_folder = Path(root_folder)
         self.handlers = handlers
         self.processed_filenames = set()
+        self.attribute_filters = self._load_config(config_file) if config_file else []
+    
+    def _load_config(self, config_file: str) -> List[str]:
+        """Load filename filters from config file."""
+        filters = []
+        config_path = Path(config_file)
+        
+        if not config_path.exists():
+            print(f"⚠️  Warning: Config file '{config_file}' not found. Processing all files.")
+            return filters
+        
+        with open(config_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                # Skip empty lines and comments
+                if line and not line.startswith('#'):
+                    filters.append(line)  # Case-sensitive matching
+        
+        if filters:
+            print(f"\n📋 Loaded {len(filters)} filename filter(s) from config:")
+            for f in filters:
+                print(f"  • {f}")
+        else:
+            print(f"\n📋 No filters in config file. Processing all files.")
+        
+        return filters
+    
+    def _matches_filters(self, filename: str) -> bool:
+        """Check if filename matches any filter."""
+        if not self.attribute_filters:
+            return True  # No filters = process all
+        
+        # Check if filename contains any filter text (case-sensitive)
+        for filter_text in self.attribute_filters:
+            if filter_text in filename:
+                return True
+        
+        return False
     
     def find_files(self) -> Dict[str, List[Path]]:
         """Find all supported files in the root folder and subfolders."""
+        print(f"\n🔍 Scanning directory: {self.root_folder}")
+        print("Please wait, searching for files...")
+        
         files_by_handler = {handler.__class__.__name__: [] for handler in self.handlers}
+        file_count = 0
         
         for file_path in self.root_folder.rglob('*'):
             if file_path.is_file():
+                file_count += 1
+                if file_count % 100 == 0:
+                    print(f"  Found {file_count} files so far...", end='\r')
+                
                 for handler in self.handlers:
                     if handler.can_handle(file_path):
                         files_by_handler[handler.__class__.__name__].append(file_path)
                         break
         
+        print(f"  ✓ Scan complete: {file_count} files found" + " " * 20)
         return files_by_handler
     
     def extract_and_save(self, output_folder: str = "."):
-        """Extract attributes and save to text files."""
+        """Extract attributes and save to individual text files."""
         output_path = Path(output_folder)
         output_path.mkdir(exist_ok=True)
         
         files_by_handler = self.find_files()
+        
+        # Track overall statistics
+        overall_processed = 0
+        overall_skipped = 0
+        overall_failed = 0
         
         # Process each handler type separately
         for handler in self.handlers:
@@ -169,69 +221,76 @@ class AttributeExtractor:
                 print(f"No files found for {handler_name}")
                 continue
             
-            # Determine output filename based on handler
-            if isinstance(handler, ShapefileHandler):
-                output_file = output_path / "shapefile_attributes.txt"
-            elif isinstance(handler, CSVHandler):
-                output_file = output_path / "csv_attributes.txt"
-            else:
-                # Generic name for other handlers
-                output_file = output_path / f"{handler_name.lower()}_attributes.txt"
-            
             total_files = len(file_paths)
             print(f"\n{'='*80}")
             print(f"Processing {total_files} files with {handler_name}")
             print(f"{'='*80}")
             
-            with open(output_file, 'w', encoding='utf-8') as f:
-                f.write(f"=== {handler_name} Attribute Extraction ===\n")
-                f.write(f"Total files found: {len(file_paths)}\n")
-                f.write(f"Generated on: {pd.Timestamp.now()}\n")
-                f.write("=" * 80 + "\n\n")
+            processed_count = 0
+            skipped_count = 0
+            failed_count = 0
+            
+            for idx, file_path in enumerate(sorted(file_paths), 1):
+                filename = file_path.name
                 
-                processed_count = 0
-                skipped_count = 0
-                failed_count = 0
+                # Show progress
+                progress_pct = (idx / total_files) * 100
+                print(f"\n[{idx}/{total_files}] ({progress_pct:.1f}%)")
+                print(f"  File: {filename}")
+                print(f"  Path: {file_path}")
                 
-                for idx, file_path in enumerate(sorted(file_paths), 1):
-                    filename = file_path.name
-                    
-                    # Show progress
-                    progress_pct = (idx / total_files) * 100
-                    print(f"\n[{idx}/{total_files}] ({progress_pct:.1f}%)")
-                    print(f"  File: {filename}")
-                    print(f"  Path: {file_path}")
-                    
-                    # Skip if filename already processed
-                    if filename in self.processed_filenames:
-                        print(f"  ⊘ Status: SKIPPED (duplicate filename)")
-                        print(f"  📊 Stats: ✓ {processed_count} | ⊘ {skipped_count + 1} | ✗ {failed_count}")
-                        skipped_count += 1
-                        continue
-                    
-                    result = handler.extract_data(file_path)
-                    
-                    if result is None:
-                        print(f"  ✗ Status: FAILED (no data found)")
-                        print(f"  📊 Stats: ✓ {processed_count} | ⊘ {skipped_count} | ✗ {failed_count + 1}")
-                        failed_count += 1
-                        continue
-                    
-                    attributes, sample_data = result
-                    
-                    # Check data completeness
-                    null_count = sum(1 for v in sample_data.values() if pd.isna(v))
-                    completeness_pct = ((len(attributes) - null_count) / len(attributes)) * 100 if attributes else 0
-                    
-                    # Show detailed info in console
-                    print(f"  ✓ Status: SUCCESS")
-                    print(f"  📋 Attributes: {len(attributes)}")
-                    print(f"  📊 Completeness: {completeness_pct:.1f}% ({len(attributes) - null_count}/{len(attributes)} fields)")
-                    print(f"  📈 Stats: ✓ {processed_count + 1} | ⊘ {skipped_count} | ✗ {failed_count}")
-                    
-                    # Write to file with simple structured format (only attributes and sample data)
+                # Check if output file already exists
+                file_stem = Path(filename).stem
+                output_file = output_path / f"{file_stem}_attributes.txt"
+                if output_file.exists():
+                    skipped_count += 1
+                    print(f"  ⊘ Status: SKIPPED (output already exists)")
+                    print(f"  📊 Stats: ✓ {processed_count} | ⊘ {skipped_count} | ✗ {failed_count}")
+                    continue
+                
+                # Check if filename matches the config filters
+                if not self._matches_filters(filename):
+                    skipped_count += 1
+                    print(f"  ⊘ Status: SKIPPED (filename not in config filters)")
+                    print(f"  📊 Stats: ✓ {processed_count} | ⊘ {skipped_count} | ✗ {failed_count}")
+                    continue
+                
+                # Skip if filename already processed
+                if filename in self.processed_filenames:
+                    skipped_count += 1
+                    print(f"  ⊘ Status: SKIPPED (duplicate filename)")
+                    print(f"  📊 Stats: ✓ {processed_count} | ⊘ {skipped_count} | ✗ {failed_count}")
+                    continue
+                
+                result = handler.extract_data(file_path)
+                
+                if result is None:
+                    failed_count += 1
+                    print(f"  ✗ Status: FAILED (no data found)")
+                    print(f"  📊 Stats: ✓ {processed_count} | ⊘ {skipped_count} | ✗ {failed_count}")
+                    continue
+                
+                attributes, sample_data = result
+                
+                # Check data completeness
+                null_count = sum(1 for v in sample_data.values() if pd.isna(v))
+                completeness_pct = ((len(attributes) - null_count) / len(attributes)) * 100 if attributes else 0
+                
+                processed_count += 1
+                
+                # Show detailed info in console
+                print(f"  ✓ Status: SUCCESS")
+                print(f"  📋 Attributes: {len(attributes)}")
+                print(f"  📊 Completeness: {completeness_pct:.1f}% ({len(attributes) - null_count}/{len(attributes)} fields)")
+                print(f"  📈 Stats: ✓ {processed_count} | ⊘ {skipped_count} | ✗ {failed_count}")
+                
+                # Write to individual file (output_file already defined above)
+                with open(output_file, 'w', encoding='utf-8') as f:
                     f.write(f"[FILE_START]\n")
-                    f.write(f"Filename: {filename}\n\n")
+                    f.write(f"Filename: {filename}\n")
+                    f.write(f"Path: {file_path}\n")
+                    f.write(f"Type: {handler_name}\n")
+                    f.write(f"Completeness: {completeness_pct:.1f}%\n\n")
                     
                     f.write("[ATTRIBUTES_START]\n")
                     for attr in attributes:
@@ -246,19 +305,10 @@ class AttributeExtractor:
                         f.write(f"{attr}|||{value_str}\n")
                     f.write("[SAMPLE_DATA_END]\n")
                     f.write("[FILE_END]\n")
-                    f.write("=" * 80 + "\n\n")
-                    
-                    self.processed_filenames.add(filename)
-                    processed_count += 1
                 
-                # Write summary
-                f.write("\n" + "=" * 80 + "\n")
-                f.write("SUMMARY\n")
-                f.write("=" * 80 + "\n")
-                f.write(f"Total files found: {len(file_paths)}\n")
-                f.write(f"Successfully processed: {processed_count}\n")
-                f.write(f"Skipped (duplicates): {skipped_count}\n")
-                f.write(f"Failed (no valid sample): {failed_count}\n")
+                print(f"  💾 Saved to: {output_file.name}")
+                
+                self.processed_filenames.add(filename)
             
             print(f"\n{'='*80}")
             print(f"SUMMARY - {handler_name}")
@@ -267,8 +317,21 @@ class AttributeExtractor:
             print(f"  ✓ Successfully processed: {processed_count}")
             print(f"  ⊘ Skipped (duplicates):   {skipped_count}")
             print(f"  ✗ Failed (no valid data): {failed_count}")
-            print(f"  📄 Output saved to:       {output_file}")
             print(f"{'='*80}")
+            
+            overall_processed += processed_count
+            overall_skipped += skipped_count
+            overall_failed += failed_count
+        
+        # Print overall summary
+        print(f"\n{'='*80}")
+        print(f"OVERALL SUMMARY")
+        print(f"{'='*80}")
+        print(f"  ✓ Total processed: {overall_processed}")
+        print(f"  ⊘ Total skipped:   {overall_skipped}")
+        print(f"  ✗ Total failed:    {overall_failed}")
+        print(f"  📁 Output folder:  {output_path.absolute()}")
+        print(f"{'='*80}")
 
 
 def main():
@@ -282,6 +345,16 @@ def main():
         print(f"Error: Folder '{root_folder}' does not exist!")
         return
     
+    # Check for config file
+    config_file = "config.txt"
+    if os.path.exists(config_file):
+        use_config = input(f"\nFound '{config_file}'. Use it to filter files? (y/n, default=y): ").strip().lower()
+        if use_config in ['n', 'no']:
+            config_file = None
+    else:
+        print(f"\nℹ️  No '{config_file}' found. Processing all files.")
+        config_file = None
+    
     # Initialize handlers - easily extensible by adding more handlers
     handlers = [
         ShapefileHandler(),
@@ -292,7 +365,7 @@ def main():
     ]
     
     # Create extractor and process files
-    extractor = AttributeExtractor(root_folder, handlers)
+    extractor = AttributeExtractor(root_folder, handlers, config_file=config_file)
     extractor.extract_and_save(output_folder="output")
     
     print("\n✓ Extraction complete!")

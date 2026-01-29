@@ -38,6 +38,23 @@ pip install -r requirements.txt
 
 ## Usage
 
+### 1. Extract Attributes
+
+**Optional: Configure Filters**
+
+Edit [config.txt](config.txt) to filter files by filename. Each line is a filter - files will be processed only if their filename contains ANY of the specified texts:
+
+```
+# config.txt example
+boundary
+population
+road
+```
+
+Leave empty or comment all lines (with `#`) to process all files.
+
+**Run the extraction:**
+
 ```powershell
 python extract_attributes.py
 ```
@@ -45,12 +62,30 @@ python extract_attributes.py
 When prompted, enter the root folder path containing your shapefiles and CSV files, or press Enter to use the current directory.
 
 The script will:
-1. Recursively search for all supported files
-2. Extract attributes and find a sample row with all non-null values
-3. Skip duplicate filenames
-4. Save results to the `output` folder:
+1. Ask if you want to use config.txt filters (if found)
+2. Recursively search for all supported files
+3. Filter files based on config (if enabled)
+4. Extract attributes and find a sample row with all non-null values
+5. Skip duplicate filenames
+6. Save results to the `output` folder:
    - `shapefile_attributes.txt` - Shapefile results
    - `csv_attributes.txt` - CSV file results
+
+### 2. Visualize Attribute Overlaps
+
+```powershell
+python visualize_attributes.py
+```
+
+When prompted, enter the path to the output folder (default: `./output`).
+
+The visualization tool will:
+1. Parse the extracted attribute files
+2. Analyze attribute overlaps across files
+3. Generate visualizations in `output/visualizations/`:
+   - **UpSet Plot** - Shows which attributes are common/unique across files
+   - **Frequency Chart** - Top 30 most common attributes
+   - **Summary Report** - Detailed text analysis
 
 ## Output Format
 

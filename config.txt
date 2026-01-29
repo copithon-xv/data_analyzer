@@ -1,0 +1,12 @@
+# Configuration file for filtering files based on filename
+# Each line represents a filter - files will be processed if their filename contains ANY of these texts
+# Lines starting with # are comments and will be ignored
+# Leave empty or comment all lines to process all files
+# Matching is CASE-SENSITIVE
+
+# Example filters (uncomment to use):
+# boundary
+# population
+# road
+# building
+# area
