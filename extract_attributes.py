@@ -355,23 +355,42 @@ class AttributeExtractor:
     def find_files(self) -> Dict[str, List[Path]]:
         """Find all supported files in the root folder and subfolders."""
         print(f"\n🔍 Scanning directory: {self.root_folder}")
-        print("Please wait, searching for files...")
+        
+        if self.attribute_filters:
+            print(f"Searching for .shp, .csv, .txt files matching config filters...")
+        else:
+            print("Searching for all .shp, .csv, and .txt files...")
         
         files_by_handler = {handler.__class__.__name__: [] for handler in self.handlers}
-        file_count = 0
         
-        for file_path in self.root_folder.rglob('*'):
-            if file_path.is_file():
-                file_count += 1
-                if file_count % 100 == 0:
-                    print(f"  Found {file_count} files so far...", end='\r')
-                
-                for handler in self.handlers:
-                    if handler.can_handle(file_path):
-                        files_by_handler[handler.__class__.__name__].append(file_path)
-                        break
+        # Search for specific extensions only (much faster than checking every file)
+        extensions = ['*.shp', '*.csv', '*.txt']
+        total_found = 0
+        total_matched = 0
         
-        print(f"  ✓ Scan complete: {file_count} files found" + " " * 20)
+        for ext in extensions:
+            print(f"  Looking for {ext} files...", end='\r')
+            for file_path in self.root_folder.rglob(ext):
+                if file_path.is_file():
+                    total_found += 1
+                    
+                    # Check config filter immediately (if filters exist)
+                    if self.attribute_filters and not self._matches_filters(file_path.name):
+                        continue  # Skip files that don't match config
+                    
+                    total_matched += 1
+                    
+                    # Match with appropriate handler
+                    for handler in self.handlers:
+                        if handler.can_handle(file_path):
+                            files_by_handler[handler.__class__.__name__].append(file_path)
+                            break
+        
+        if self.attribute_filters:
+            print(f"  ✓ Scan complete: {total_matched} matched files (from {total_found} total)" + " " * 30)
+        else:
+            print(f"  ✓ Scan complete: {total_found} files found" + " " * 30)
+        
         return files_by_handler
     
     def extract_and_save(self, output_folder: str = "."):
@@ -422,13 +441,7 @@ class AttributeExtractor:
                     print(f"  📊 Stats: ✓ {processed_count} | ⊘ {skipped_count} | ✗ {failed_count}")
                     continue
                 
-                # Check if filename matches the config filters
-                if not self._matches_filters(filename):
-                    skipped_count += 1
-                    print(f"  ⊘ Status: SKIPPED (filename not in config filters)")
-                    print(f"  📊 Stats: ✓ {processed_count} | ⊘ {skipped_count} | ✗ {failed_count}")
-                    continue
-                
+
                 # Skip if filename already processed
                 if filename in self.processed_filenames:
                     skipped_count += 1
