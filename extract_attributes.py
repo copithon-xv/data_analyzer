@@ -91,45 +91,219 @@ class CSVHandler(FileHandler):
     
     def extract_data(self, file_path: Path) -> Optional[Tuple[List[str], Dict[str, Any]]]:
         try:
-            # Read only first 10,000 rows for efficiency
-            df = pd.read_csv(file_path, nrows=10000)
+            # Check file size to determine strategy
+            file_size = file_path.stat().st_size
             
-            if df.empty:
+            # For files larger than 100MB, use chunked reading
+            if file_size > 100 * 1024 * 1024:
+                print(f"    💾 Large file detected ({file_size / (1024**3):.2f} GB), using chunked reading...")
+                return self._extract_chunked(file_path)
+            else:
+                # For smaller files, read directly with row limit
+                df = pd.read_csv(file_path, nrows=10000)
+                
+                if df.empty:
+                    return None
+                
+                attributes = list(df.columns)
+                
+                best_row = None
+                best_count = -1
+                
+                for idx, row in df.iterrows():
+                    null_count = row.isnull().sum()
+                    non_null_count = len(row) - null_count
+                    
+                    if null_count == 0:
+                        return attributes, row.to_dict()
+                    
+                    if non_null_count > best_count:
+                        best_count = non_null_count
+                        best_row = row
+                
+                if best_row is not None:
+                    return attributes, best_row.to_dict()
+                
                 return None
             
-            # Get column names (attributes)
-            attributes = list(df.columns)
+        except Exception as e:
+            print(f"Error reading CSV {file_path}: {e}")
+            return None
+    
+    def _extract_chunked(self, file_path: Path) -> Optional[Tuple[List[str], Dict[str, Any]]]:
+        """Extract data using chunked reading for large files."""
+        try:
+            chunk_size = 1000
+            max_rows_to_check = 10000
+            rows_checked = 0
             
             best_row = None
             best_count = -1
+            attributes = None
             
-            # Find first row where all attributes have data (no nulls)
-            # Or track the row with most non-null values
-            for idx, row in df.iterrows():
-                null_count = row.isnull().sum()
-                non_null_count = len(row) - null_count
+            for chunk in pd.read_csv(file_path, chunksize=chunk_size):
+                if attributes is None:
+                    attributes = list(chunk.columns)
                 
-                if null_count == 0:
-                    # Found perfect row with all data
-                    return attributes, row.to_dict()
+                for idx, row in chunk.iterrows():
+                    null_count = row.isnull().sum()
+                    non_null_count = len(row) - null_count
+                    
+                    if null_count == 0:
+                        # Found perfect row, return immediately
+                        return attributes, row.to_dict()
+                    
+                    if non_null_count > best_count:
+                        best_count = non_null_count
+                        best_row = row
                 
-                # Track best row (most complete)
-                if non_null_count > best_count:
-                    best_count = non_null_count
-                    best_row = row
+                rows_checked += len(chunk)
+                if rows_checked % 5000 == 0:
+                    print(f"    🔍 Checked {rows_checked} rows...", end='\r')
+                
+                if rows_checked >= max_rows_to_check:
+                    break
             
-            # Use the best row found (most complete data)
             if best_row is not None:
                 return attributes, best_row.to_dict()
             
             return None
             
         except Exception as e:
-            print(f"Error reading CSV {file_path}: {e}")
+            print(f"Error reading CSV in chunks {file_path}: {e}")
             return None
 
 
 # To extend: Add more handlers here (e.g., GeoJSONHandler, ExcelHandler, etc.)
+
+
+class TXTHandler(FileHandler):
+    """Handler for TXT files that contain CSV-like data."""
+    
+    def can_handle(self, file_path: Path) -> bool:
+        return file_path.suffix.lower() == '.txt'
+    
+    def extract_data(self, file_path: Path) -> Optional[Tuple[List[str], Dict[str, Any]]]:
+        try:
+            # Check file size
+            file_size = file_path.stat().st_size
+            print(f"    💾 File size: {file_size / (1024**3):.2f} GB")
+            
+            # For very large files, use chunked reading with auto-delimiter detection
+            if file_size > 100 * 1024 * 1024:
+                print(f"    🔍 Large TXT file detected, using chunked reading...")
+                return self._extract_chunked(file_path)
+            else:
+                # Try to detect delimiter and read sample
+                return self._extract_small(file_path)
+            
+        except Exception as e:
+            print(f"Error reading TXT file {file_path}: {e}")
+            return None
+    
+    def _detect_delimiter(self, file_path: Path) -> str:
+        """Detect the delimiter used in the file."""
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                first_line = f.readline()
+                
+                # Count potential delimiters
+                delimiters = [',', '\t', '|', ';', ' ']
+                counts = {delim: first_line.count(delim) for delim in delimiters}
+                
+                # Return delimiter with highest count (if > 0)
+                best_delim = max(counts, key=counts.get)
+                if counts[best_delim] > 0:
+                    return best_delim
+                
+                return ','  # Default to comma
+        except:
+            return ','
+    
+    def _extract_small(self, file_path: Path) -> Optional[Tuple[List[str], Dict[str, Any]]]:
+        """Extract data from smaller TXT files."""
+        try:
+            delimiter = self._detect_delimiter(file_path)
+            print(f"    🔍 Detected delimiter: '{delimiter}' (tab)" if delimiter == '\t' else f"    🔍 Detected delimiter: '{delimiter}'")
+            
+            df = pd.read_csv(file_path, sep=delimiter, nrows=10000, encoding='utf-8', 
+                           on_bad_lines='skip', engine='python')
+            
+            if df.empty:
+                return None
+            
+            attributes = list(df.columns)
+            best_row = None
+            best_count = -1
+            
+            for idx, row in df.iterrows():
+                null_count = row.isnull().sum()
+                non_null_count = len(row) - null_count
+                
+                if null_count == 0:
+                    return attributes, row.to_dict()
+                
+                if non_null_count > best_count:
+                    best_count = non_null_count
+                    best_row = row
+            
+            if best_row is not None:
+                return attributes, best_row.to_dict()
+            
+            return None
+            
+        except Exception as e:
+            print(f"    ⚠️  Error reading as delimited file: {e}")
+            return None
+    
+    def _extract_chunked(self, file_path: Path) -> Optional[Tuple[List[str], Dict[str, Any]]]:
+        """Extract data using chunked reading for large TXT files."""
+        try:
+            delimiter = self._detect_delimiter(file_path)
+            print(f"    🔍 Detected delimiter: '{delimiter}' (tab)" if delimiter == '\t' else f"    🔍 Detected delimiter: '{delimiter}'")
+            
+            chunk_size = 1000
+            max_rows_to_check = 10000
+            rows_checked = 0
+            
+            best_row = None
+            best_count = -1
+            attributes = None
+            
+            reader = pd.read_csv(file_path, sep=delimiter, chunksize=chunk_size, 
+                               encoding='utf-8', on_bad_lines='skip', engine='python')
+            
+            for chunk in reader:
+                if attributes is None:
+                    attributes = list(chunk.columns)
+                
+                for idx, row in chunk.iterrows():
+                    null_count = row.isnull().sum()
+                    non_null_count = len(row) - null_count
+                    
+                    if null_count == 0:
+                        return attributes, row.to_dict()
+                    
+                    if non_null_count > best_count:
+                        best_count = non_null_count
+                        best_row = row
+                
+                rows_checked += len(chunk)
+                if rows_checked % 2000 == 0:
+                    print(f"    🔍 Checked {rows_checked}/{max_rows_to_check} rows...", end='\r')
+                
+                if rows_checked >= max_rows_to_check:
+                    print(f"    ✓ Completed checking {rows_checked} rows" + " " * 20)
+                    break
+            
+            if best_row is not None:
+                return attributes, best_row.to_dict()
+            
+            return None
+            
+        except Exception as e:
+            print(f"    ⚠️  Error reading TXT file in chunks: {e}")
+            return None
 
 
 class AttributeExtractor:
@@ -359,6 +533,7 @@ def main():
     handlers = [
         ShapefileHandler(),
         CSVHandler(),
+        TXTHandler(),
         # Add more handlers here as needed:
         # GeoJSONHandler(),
         # ExcelHandler(),

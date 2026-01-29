@@ -6,10 +6,15 @@ A Python tool to extract attributes from various file types (shapefiles, CSV, et
 
 - ✅ Extract attributes from shapefiles (.shp)
 - ✅ Extract attributes from CSV files (.csv)
+- ✅ Extract attributes from TXT files (.txt) with CSV-like data
+- ✅ Efficient chunked reading for large files (>100MB)
+- ✅ Automatic delimiter detection for TXT files
 - ✅ Skip duplicate filenames across different folders
+- ✅ Skip already processed files (output exists)
 - ✅ Find sample data where all attributes have non-null values
 - ✅ Extensible design for adding new file type handlers
-- ✅ Separate output files for different file types
+- ✅ Individual output files for each input file
+- ✅ Case-sensitive filename filtering
 
 ## Setup
 
