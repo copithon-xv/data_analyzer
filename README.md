@@ -45,6 +45,19 @@ pip install -r requirements.txt
 
 ### 1. Extract Attributes
 
+**Option A: Process a Single File**
+
+```powershell
+python extract_attributes.py --file "path\to\your\file.shp"
+# or short form
+python extract_attributes.py -f "data\population.csv"
+
+# Specify custom output folder
+python extract_attributes.py -f "data\roads.shp" -o "my_output"
+```
+
+**Option B: Process All Files in a Directory**
+
 **Optional: Configure Filters**
 
 Edit [config.txt](config.txt) to filter files by filename. Each line is a filter - files will be processed only if their filename contains ANY of the specified texts:

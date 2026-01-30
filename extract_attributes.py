@@ -3,6 +3,9 @@ Extract attributes from various file types (shapefiles, CSV, etc.) with sample d
 Extensible design for adding new file type handlers.
 """
 import os
+import sys
+import csv
+import argparse
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from abc import ABC, abstractmethod
@@ -91,49 +94,9 @@ class CSVHandler(FileHandler):
     
     def extract_data(self, file_path: Path) -> Optional[Tuple[List[str], Dict[str, Any]]]:
         try:
-            # Check file size to determine strategy
             file_size = file_path.stat().st_size
+            print(f"    💾 File size: {file_size / (1024**3):.2f} GB")
             
-            # For files larger than 100MB, use chunked reading
-            if file_size > 100 * 1024 * 1024:
-                print(f"    💾 Large file detected ({file_size / (1024**3):.2f} GB), using chunked reading...")
-                return self._extract_chunked(file_path)
-            else:
-                # For smaller files, read directly with row limit
-                df = pd.read_csv(file_path, nrows=10000)
-                
-                if df.empty:
-                    return None
-                
-                attributes = list(df.columns)
-                
-                best_row = None
-                best_count = -1
-                
-                for idx, row in df.iterrows():
-                    null_count = row.isnull().sum()
-                    non_null_count = len(row) - null_count
-                    
-                    if null_count == 0:
-                        return attributes, row.to_dict()
-                    
-                    if non_null_count > best_count:
-                        best_count = non_null_count
-                        best_row = row
-                
-                if best_row is not None:
-                    return attributes, best_row.to_dict()
-                
-                return None
-            
-        except Exception as e:
-            print(f"Error reading CSV {file_path}: {e}")
-            return None
-    
-    def _extract_chunked(self, file_path: Path) -> Optional[Tuple[List[str], Dict[str, Any]]]:
-        """Extract data using chunked reading for large files."""
-        try:
-            chunk_size = 1000
             max_rows_to_check = 10000
             rows_checked = 0
             
@@ -141,36 +104,61 @@ class CSVHandler(FileHandler):
             best_count = -1
             attributes = None
             
-            for chunk in pd.read_csv(file_path, chunksize=chunk_size):
-                if attributes is None:
-                    attributes = list(chunk.columns)
+            # Read as text and manually parse to avoid field size limits
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                # Get headers from first line
+                header_line = f.readline().strip()
+                if not header_line:
+                    return None
                 
-                for idx, row in chunk.iterrows():
-                    null_count = row.isnull().sum()
-                    non_null_count = len(row) - null_count
+                # Split on comma (simple split for CSV)
+                attributes = [col.strip('"').strip() for col in header_line.split(',')]
+                
+                # Process rows
+                for line in f:
+                    rows_checked += 1
+                    line = line.strip()
                     
-                    if null_count == 0:
-                        # Found perfect row, return immediately
-                        return attributes, row.to_dict()
+                    if not line:
+                        continue
                     
+                    # Simple split - this avoids csv field size limits
+                    row = [val.strip('"').strip() for val in line.split(',')]
+                    
+                    # Skip rows with wrong column count
+                    if len(row) != len(attributes):
+                        continue
+                    
+                    # Count non-empty values
+                    non_null_count = sum(1 for val in row if val)
+                    
+                    # Perfect row found
+                    if non_null_count == len(attributes):
+                        row_dict = {attributes[i]: row[i] for i in range(len(attributes))}
+                        return attributes, row_dict
+                    
+                    # Track best row
                     if non_null_count > best_count:
                         best_count = non_null_count
                         best_row = row
-                
-                rows_checked += len(chunk)
-                if rows_checked % 5000 == 0:
-                    print(f"    🔍 Checked {rows_checked} rows...", end='\r')
-                
-                if rows_checked >= max_rows_to_check:
-                    break
+                    
+                    # Progress indicator
+                    if rows_checked % 5000 == 0:
+                        print(f"    🔍 Checked {rows_checked} rows...", end='\r')
+                    
+                    # Stop after checking enough rows
+                    if rows_checked >= max_rows_to_check:
+                        print(f"    ✓ Checked {rows_checked} rows" + " " * 20)
+                        break
             
             if best_row is not None:
-                return attributes, best_row.to_dict()
+                row_dict = {attributes[i]: best_row[i] if i < len(best_row) else '' for i in range(len(attributes))}
+                return attributes, row_dict
             
             return None
             
         except Exception as e:
-            print(f"Error reading CSV in chunks {file_path}: {e}")
+            print(f"    ⚠️  Error reading CSV: {e}")
             return None
 
 
@@ -185,20 +173,75 @@ class TXTHandler(FileHandler):
     
     def extract_data(self, file_path: Path) -> Optional[Tuple[List[str], Dict[str, Any]]]:
         try:
-            # Check file size
             file_size = file_path.stat().st_size
             print(f"    💾 File size: {file_size / (1024**3):.2f} GB")
             
-            # For very large files, use chunked reading with auto-delimiter detection
-            if file_size > 100 * 1024 * 1024:
-                print(f"    🔍 Large TXT file detected, using chunked reading...")
-                return self._extract_chunked(file_path)
-            else:
-                # Try to detect delimiter and read sample
-                return self._extract_small(file_path)
+            # Detect delimiter
+            delimiter = self._detect_delimiter(file_path)
+            print(f"    🔍 Detected delimiter: 'tab'" if delimiter == '\t' else f"    🔍 Detected delimiter: '{delimiter}'")
+            
+            max_rows_to_check = 10000
+            rows_checked = 0
+            
+            best_row = None
+            best_count = -1
+            attributes = None
+            
+            # Read as text and manually parse to avoid field size limits
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                # Get headers from first line
+                header_line = f.readline().strip()
+                if not header_line:
+                    return None
+                
+                # Split on detected delimiter
+                attributes = [col.strip('"').strip() for col in header_line.split(delimiter)]
+                
+                # Process rows
+                for line in f:
+                    rows_checked += 1
+                    line = line.strip()
+                    
+                    if not line:
+                        continue
+                    
+                    # Simple split - this avoids csv field size limits
+                    row = [val.strip('"').strip() for val in line.split(delimiter)]
+                    
+                    # Skip rows with wrong column count
+                    if len(row) != len(attributes):
+                        continue
+                    
+                    # Count non-empty values
+                    non_null_count = sum(1 for val in row if val)
+                    
+                    # Perfect row found
+                    if non_null_count == len(attributes):
+                        row_dict = {attributes[i]: row[i] for i in range(len(attributes))}
+                        return attributes, row_dict
+                    
+                    # Track best row
+                    if non_null_count > best_count:
+                        best_count = non_null_count
+                        best_row = row
+                    
+                    # Progress indicator
+                    if rows_checked % 5000 == 0:
+                        print(f"    🔍 Checked {rows_checked} rows...", end='\r')
+                    
+                    # Stop after checking enough rows
+                    if rows_checked >= max_rows_to_check:
+                        print(f"    ✓ Checked {rows_checked} rows" + " " * 20)
+                        break
+            
+            if best_row is not None:
+                row_dict = {attributes[i]: best_row[i] if i < len(best_row) else '' for i in range(len(attributes))}
+                return attributes, row_dict
+            
+            return None
             
         except Exception as e:
-            print(f"Error reading TXT file {file_path}: {e}")
+            print(f"    ⚠️  Error reading TXT file: {e}")
             return None
     
     def _detect_delimiter(self, file_path: Path) -> str:
@@ -208,7 +251,7 @@ class TXTHandler(FileHandler):
                 first_line = f.readline()
                 
                 # Count potential delimiters
-                delimiters = [',', '\t', '|', ';', ' ']
+                delimiters = [',', '\t', '|', ';']
                 counts = {delim: first_line.count(delim) for delim in delimiters}
                 
                 # Return delimiter with highest count (if > 0)
@@ -219,91 +262,6 @@ class TXTHandler(FileHandler):
                 return ','  # Default to comma
         except:
             return ','
-    
-    def _extract_small(self, file_path: Path) -> Optional[Tuple[List[str], Dict[str, Any]]]:
-        """Extract data from smaller TXT files."""
-        try:
-            delimiter = self._detect_delimiter(file_path)
-            print(f"    🔍 Detected delimiter: '{delimiter}' (tab)" if delimiter == '\t' else f"    🔍 Detected delimiter: '{delimiter}'")
-            
-            df = pd.read_csv(file_path, sep=delimiter, nrows=10000, encoding='utf-8', 
-                           on_bad_lines='skip', engine='python')
-            
-            if df.empty:
-                return None
-            
-            attributes = list(df.columns)
-            best_row = None
-            best_count = -1
-            
-            for idx, row in df.iterrows():
-                null_count = row.isnull().sum()
-                non_null_count = len(row) - null_count
-                
-                if null_count == 0:
-                    return attributes, row.to_dict()
-                
-                if non_null_count > best_count:
-                    best_count = non_null_count
-                    best_row = row
-            
-            if best_row is not None:
-                return attributes, best_row.to_dict()
-            
-            return None
-            
-        except Exception as e:
-            print(f"    ⚠️  Error reading as delimited file: {e}")
-            return None
-    
-    def _extract_chunked(self, file_path: Path) -> Optional[Tuple[List[str], Dict[str, Any]]]:
-        """Extract data using chunked reading for large TXT files."""
-        try:
-            delimiter = self._detect_delimiter(file_path)
-            print(f"    🔍 Detected delimiter: '{delimiter}' (tab)" if delimiter == '\t' else f"    🔍 Detected delimiter: '{delimiter}'")
-            
-            chunk_size = 1000
-            max_rows_to_check = 10000
-            rows_checked = 0
-            
-            best_row = None
-            best_count = -1
-            attributes = None
-            
-            reader = pd.read_csv(file_path, sep=delimiter, chunksize=chunk_size, 
-                               encoding='utf-8', on_bad_lines='skip', engine='python')
-            
-            for chunk in reader:
-                if attributes is None:
-                    attributes = list(chunk.columns)
-                
-                for idx, row in chunk.iterrows():
-                    null_count = row.isnull().sum()
-                    non_null_count = len(row) - null_count
-                    
-                    if null_count == 0:
-                        return attributes, row.to_dict()
-                    
-                    if non_null_count > best_count:
-                        best_count = non_null_count
-                        best_row = row
-                
-                rows_checked += len(chunk)
-                if rows_checked % 2000 == 0:
-                    print(f"    🔍 Checked {rows_checked}/{max_rows_to_check} rows...", end='\r')
-                
-                if rows_checked >= max_rows_to_check:
-                    print(f"    ✓ Completed checking {rows_checked} rows" + " " * 20)
-                    break
-            
-            if best_row is not None:
-                return attributes, best_row.to_dict()
-            
-            return None
-            
-        except Exception as e:
-            print(f"    ⚠️  Error reading TXT file in chunks: {e}")
-            return None
 
 
 class AttributeExtractor:
@@ -521,8 +479,122 @@ class AttributeExtractor:
         print(f"{'='*80}")
 
 
+def process_single_file(file_path: str, handlers: List[FileHandler], output_folder: str = "output"):
+    """Process a single file directly."""
+    file_path = Path(file_path)
+    
+    if not file_path.exists():
+        print(f"❌ Error: File '{file_path}' does not exist!")
+        return
+    
+    if not file_path.is_file():
+        print(f"❌ Error: '{file_path}' is not a file!")
+        return
+    
+    # Find appropriate handler
+    handler = None
+    for h in handlers:
+        if h.can_handle(file_path):
+            handler = h
+            break
+    
+    if handler is None:
+        print(f"❌ Error: No handler available for file type '{file_path.suffix}'")
+        print("Supported types: .shp, .csv, .txt")
+        return
+    
+    print(f"\n{'='*80}")
+    print(f"SINGLE FILE PROCESSING")
+    print(f"{'='*80}")
+    print(f"File: {file_path.name}")
+    print(f"Path: {file_path.absolute()}")
+    print(f"Type: {handler.__class__.__name__}")
+    print(f"{'='*80}\n")
+    
+    # Extract data
+    print("🔍 Extracting attributes...")
+    result = handler.extract_data(file_path)
+    
+    if result is None:
+        print("❌ FAILED: No valid data found in file")
+        return
+    
+    attributes, sample_data = result
+    
+    # Check data completeness
+    null_count = sum(1 for v in sample_data.values() if pd.isna(v))
+    completeness_pct = ((len(attributes) - null_count) / len(attributes)) * 100 if attributes else 0
+    
+    print(f"✓ SUCCESS")
+    print(f"  📋 Attributes: {len(attributes)}")
+    print(f"  📊 Completeness: {completeness_pct:.1f}% ({len(attributes) - null_count}/{len(attributes)} fields)")
+    
+    # Create output
+    output_path = Path(output_folder)
+    output_path.mkdir(exist_ok=True)
+    
+    file_stem = file_path.stem
+    output_file = output_path / f"{file_stem}_attributes.txt"
+    
+    # Write to file
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write(f"[FILE_START]\n")
+        f.write(f"Filename: {file_path.name}\n")
+        f.write(f"Path: {file_path.absolute()}\n")
+        f.write(f"Type: {handler.__class__.__name__}\n")
+        f.write(f"Completeness: {completeness_pct:.1f}%\n\n")
+        
+        f.write("[ATTRIBUTES_START]\n")
+        for attr in attributes:
+            f.write(f"{attr}\n")
+        f.write("[ATTRIBUTES_END]\n\n")
+        
+        f.write("[SAMPLE_DATA_START]\n")
+        for attr in attributes:
+            value = sample_data.get(attr, 'N/A')
+            value_str = str(value)
+            f.write(f"{attr}|||{value_str}\n")
+        f.write("[SAMPLE_DATA_END]\n")
+        f.write("[FILE_END]\n")
+    
+    print(f"\n💾 Output saved to: {output_file.absolute()}")
+    print(f"\n{'='*80}")
+
+
 def main():
     """Main entry point."""
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description='Extract attributes from shapefiles, CSV, and TXT files.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Process all files in a directory
+  python extract_attributes.py
+  
+  # Process a single specific file
+  python extract_attributes.py --file data/boundary.shp
+  python extract_attributes.py -f data/population.csv
+        """
+    )
+    parser.add_argument('-f', '--file', type=str, help='Process a single file instead of directory scan')
+    parser.add_argument('-o', '--output', type=str, default='output', help='Output folder (default: output)')
+    
+    args = parser.parse_args()
+    
+    # Initialize handlers
+    handlers = [
+        ShapefileHandler(),
+        CSVHandler(),
+        TXTHandler(),
+    ]
+    
+    # If single file mode
+    if args.file:
+        process_single_file(args.file, handlers, args.output)
+        return
+    
+    # Directory mode (original behavior)
     # Get the root folder from user or use current directory
     root_folder = input("Enter the root folder path (or press Enter for current directory): ").strip()
     if not root_folder:
@@ -542,19 +614,9 @@ def main():
         print(f"\nℹ️  No '{config_file}' found. Processing all files.")
         config_file = None
     
-    # Initialize handlers - easily extensible by adding more handlers
-    handlers = [
-        ShapefileHandler(),
-        CSVHandler(),
-        TXTHandler(),
-        # Add more handlers here as needed:
-        # GeoJSONHandler(),
-        # ExcelHandler(),
-    ]
-    
     # Create extractor and process files
     extractor = AttributeExtractor(root_folder, handlers, config_file=config_file)
-    extractor.extract_and_save(output_folder="output")
+    extractor.extract_and_save(output_folder=args.output)
     
     print("\n✓ Extraction complete!")
     print("Check the 'output' folder for results.")
